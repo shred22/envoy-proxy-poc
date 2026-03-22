@@ -1,0 +1,269 @@
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: ${PROJECT_NAME}-deployment-template
+  annotations:
+    description: "Spring Boot + Envoy sidecar Deployment with mTLS"
+objects:
+
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: ${PROJECT_NAME}-${BRANCH_NAME_HY}
+    labels:
+      app: ${PROJECT_NAME}
+      branch: ${BRANCH_NAME_HY}
+  spec:
+    replicas: ${{REPLICAS}}
+    selector:
+      matchLabels:
+        app: ${PROJECT_NAME}
+        branch: ${BRANCH_NAME_HY}
+    template:
+      metadata:
+        labels:
+          app: ${PROJECT_NAME}
+          branch: ${BRANCH_NAME_HY}
+        annotations:
+          # ── OpenShift / Kubernetes annotations ──────────────────────────
+          # Prevent Istio/OCP service-mesh from injecting a second sidecar
+          sidecar.istio.io/inject: "false"
+          # Prometheus scrape via Envoy admin stats endpoint
+          prometheus.io/scrape: "true"
+          prometheus.io/port: "9901"
+          prometheus.io/path: "/stats/prometheus"
+      spec:
+        # ── Security Context (Pod level) ────────────────────────────────
+        # OCP SCC: 'restricted' is fine IF the image runs as a non-root user.
+        # If you need to bind port <1024 you must request 'anyuid' or set
+        # NET_BIND_SERVICE capability.  Ports 8443/9090/9091 are all >1024,
+        # so 'restricted' SCC works here.
+        securityContext:
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+
+        serviceAccountName: ${PROJECT_NAME}-sa
+
+        # ── Init container: wait for cert Secret to be populated ─────────
+        initContainers:
+          - name: cert-check
+            image: busybox:1.36
+            command:
+              - sh
+              - -c
+              - |
+                until [ -f /etc/envoy/certs/tls.crt ] && \
+                      [ -f /etc/envoy/certs/tls.key ] && \
+                      [ -f /etc/envoy/certs/ca.crt ]; do
+                  echo "Waiting for certificates..."
+                  sleep 2
+                done
+                echo "Certificates present."
+            volumeMounts:
+              - name: envoy-certs
+                mountPath: /etc/envoy/certs
+                readOnly: true
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+
+        containers:
+          # ── [1] Spring Boot application ──────────────────────────────
+          - name: app
+            image: ${APP_IMAGE}:${IMAGE_TAG}
+            ports:
+              - name: http
+                containerPort: 8080
+                protocol: TCP
+            env:
+              - name: SERVER_PORT
+                value: "8080"
+              # Tell the app to reach the gRPC service via Envoy loopback
+              - name: GRPC_EGRESS_HOST
+                value: "127.0.0.1"
+              - name: GRPC_EGRESS_PORT
+                value: "9090"
+              # Tell the app to reach REST APIs via Envoy loopback
+              - name: REST_EGRESS_HOST
+                value: "127.0.0.1"
+              - name: REST_EGRESS_PORT
+                value: "9091"
+            resources:
+              requests:
+                cpu: "250m"
+                memory: "512Mi"
+              limits:
+                cpu: "1000m"
+                memory: "1Gi"
+            readinessProbe:
+              httpGet:
+                path: /actuator/health/readiness
+                port: 8080
+              initialDelaySeconds: 15
+              periodSeconds: 10
+              failureThreshold: 3
+            livenessProbe:
+              httpGet:
+                path: /actuator/health/liveness
+                port: 8080
+              initialDelaySeconds: 30
+              periodSeconds: 20
+              failureThreshold: 3
+            securityContext:
+              allowPrivilegeEscalation: false
+              runAsNonRoot: true
+              capabilities:
+                drop: ["ALL"]
+
+          # ── [2] Envoy sidecar ────────────────────────────────────────
+          - name: envoy
+            image: envoyproxy/envoy:v1.30-latest
+            args:
+              - "-c"
+              - "/etc/envoy/config/envoy.yaml"
+              - "--log-level"
+              - "info"
+              - "--component-log-level"
+              - "upstream:debug,connection:debug"
+            ports:
+              - name: ingress-mtls
+                containerPort: 8443
+                protocol: TCP
+              - name: egress-grpc
+                containerPort: 9090
+                protocol: TCP
+              - name: egress-http
+                containerPort: 9091
+                protocol: TCP
+              - name: admin
+                containerPort: 9901
+                protocol: TCP
+            volumeMounts:
+              - name: envoy-config
+                mountPath: /etc/envoy/config
+                readOnly: true
+              - name: envoy-sds
+                mountPath: /etc/envoy/sds
+                readOnly: true
+              - name: envoy-certs
+                mountPath: /etc/envoy/certs
+                readOnly: true
+            resources:
+              requests:
+                cpu: "100m"
+                memory: "128Mi"
+              limits:
+                cpu: "500m"
+                memory: "256Mi"
+            readinessProbe:
+              httpGet:
+                path: /ready
+                port: 9901
+              initialDelaySeconds: 5
+              periodSeconds: 5
+            livenessProbe:
+              httpGet:
+                path: /server_info
+                port: 9901
+              initialDelaySeconds: 10
+              periodSeconds: 20
+            securityContext:
+              allowPrivilegeEscalation: false
+              runAsNonRoot: true
+              runAsUser: 1001
+              capabilities:
+                drop: ["ALL"]
+
+        volumes:
+          # envoy.yaml + SDS files from ConfigMap
+          - name: envoy-config
+            configMap:
+              name: ${PROJECT_NAME}-${BRANCH_NAME_HY}-envoy
+              items:
+                - key: envoy.yaml
+                  path: envoy.yaml
+          - name: envoy-sds
+            configMap:
+              name: ${PROJECT_NAME}-${BRANCH_NAME_HY}-envoy
+              items:
+                - key: server_cert_sds.yaml
+                  path: server_cert_sds.yaml
+                - key: client_cert_sds.yaml
+                  path: client_cert_sds.yaml
+                - key: validation_context_sds_secret.yaml
+                  path: validation_context_sds_secret.yaml
+          # TLS certificates from a Kubernetes Secret (cert-manager or manual)
+          - name: envoy-certs
+            secret:
+              secretName: ${PROJECT_NAME}-${BRANCH_NAME_HY}-tls
+              defaultMode: 0440
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Service – exposes the ingress mTLS port via a ClusterIP Service.
+# Use a Route or IngressController with passthrough termination so
+# the external TLS handshake reaches Envoy directly.
+# ─────────────────────────────────────────────────────────────────────────────
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: ${PROJECT_NAME}-${BRANCH_NAME_HY}
+    labels:
+      app: ${PROJECT_NAME}
+  spec:
+    selector:
+      app: ${PROJECT_NAME}
+      branch: ${BRANCH_NAME_HY}
+    ports:
+      - name: ingress-mtls
+        port: 8443
+        targetPort: 8443
+        protocol: TCP
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OpenShift Route – TLS passthrough so Envoy performs the handshake
+# ─────────────────────────────────────────────────────────────────────────────
+- apiVersion: route.openshift.io/v1
+  kind: Route
+  metadata:
+    name: ${PROJECT_NAME}-${BRANCH_NAME_HY}
+    labels:
+      app: ${PROJECT_NAME}
+  spec:
+    host: ${ROUTE_HOST}
+    to:
+      kind: Service
+      name: ${PROJECT_NAME}-${BRANCH_NAME_HY}
+    port:
+      targetPort: ingress-mtls
+    tls:
+      termination: passthrough   # TLS passthrough – Envoy does mTLS
+      insecureEdgeTerminationPolicy: None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ServiceAccount
+# ─────────────────────────────────────────────────────────────────────────────
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: ${PROJECT_NAME}-sa
+    labels:
+      app: ${PROJECT_NAME}
+
+parameters:
+  - name: PROJECT_NAME
+    required: false
+    value: envoy-poc
+  - name: BRANCH_NAME_HY
+    required: true
+  - name: REPLICAS
+    value: "1"
+  - name: APP_IMAGE
+    required: true
+    description: "Full image repository path for the Spring Boot app"
+  - name: IMAGE_TAG
+    value: "latest"
+  - name: ROUTE_HOST
+    required: true
+    description: "Fully-qualified hostname for the OpenShift Route"

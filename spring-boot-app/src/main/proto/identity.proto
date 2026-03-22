@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "com.poc.envoy.grpc.proto";
+option java_outer_classname = "IdentityProto";
+
+package identity;
+
+// Simple identity/echo service used to test mTLS gRPC egress
+service IdentityService {
+  rpc GetIdentity (IdentityRequest) returns (IdentityResponse);
+  rpc Echo (EchoRequest) returns (EchoResponse);
+}
+
+message IdentityRequest {
+  string subject_id = 1;
+}
+
+message IdentityResponse {
+  string subject_id = 1;
+  string display_name = 2;
+  string email = 3;
+  int64 timestamp_ms = 4;
+}
+
+message EchoRequest {
+  string message = 1;
+}
+
+message EchoResponse {
+  string echo = 1;
+  string received_by = 2;
+}

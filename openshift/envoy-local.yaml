@@ -1,0 +1,201 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# envoy-local.yaml  –  Envoy config for docker-compose / local testing.
+# Differences vs the OpenShift ConfigMap:
+#   - gRPC cluster points to the grpc-mock container (host: grpc-mock, port: 50051)
+#     with plain TCP (no mTLS) since the mock doesn't have certs.
+#   - REST cluster points to rest-mock container (host: rest-mock, port: 8080).
+# ─────────────────────────────────────────────────────────────────────────────
+node:
+  id: envoy-local
+  cluster: poc-local-cluster
+
+admin:
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 9901
+
+layered_runtime:
+  layers:
+    - name: runtime-0
+      admin_layer: {}
+
+static_resources:
+
+  listeners:
+
+    # ── Ingress: mTLS -> Spring Boot 8080 ──────────────────────────────────
+    - name: ingress_listener
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 8443
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_params:
+                  tls_minimum_protocol_version: TLSv1_2
+                tls_certificate_sds_secret_configs:
+                  - name: server_cert
+                    sds_config:
+                      path_config_source:
+                        path: /etc/envoy/sds/tls_certificate_sds_secret.yaml
+                      resource_api_version: V3
+                validation_context_sds_secret_config:
+                  name: validation_context
+                  sds_config:
+                    path_config_source:
+                      path: /etc/envoy/sds/validation_context_sds_secret.yaml
+                    resource_api_version: V3
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_http
+                codec_type: AUTO
+                forward_client_cert_details: SANITIZE_SET
+                set_current_client_cert_details:
+                  subject: true
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                route_config:
+                  name: ingress_route
+                  virtual_hosts:
+                    - name: springboot_app
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: "/"
+                          route:
+                            cluster: springboot_cluster
+                            timeout: 30s
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    # ── Egress gRPC -> grpc-mock (plaintext for local testing) ─────────────
+    - name: egress_grpc_listener
+      address:
+        socket_address:
+          address: 127.0.0.1
+          port_value: 9090
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: egress_grpc
+                codec_type: HTTP2
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                route_config:
+                  name: egress_grpc_route
+                  virtual_hosts:
+                    - name: grpc_backend
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: "/"
+                            grpc: {}
+                          route:
+                            cluster: grpc_mock_cluster
+                            timeout: 60s
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    # ── Egress HTTP -> rest-mock (plaintext for local testing) ─────────────
+    - name: egress_http_listener
+      address:
+        socket_address:
+          address: 127.0.0.1
+          port_value: 9091
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: egress_http
+                codec_type: AUTO
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                route_config:
+                  name: egress_http_route
+                  virtual_hosts:
+                    - name: rest_backend
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: "/"
+                          route:
+                            cluster: rest_mock_cluster
+                            timeout: 30s
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+
+    - name: springboot_cluster
+      type: STATIC
+      connect_timeout: 5s
+      load_assignment:
+        cluster_name: springboot_cluster
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: 8080
+      health_checks:
+        - timeout: 3s
+          interval: 10s
+          unhealthy_threshold: 3
+          healthy_threshold: 2
+          http_health_check:
+            path: /actuator/health
+
+    - name: grpc_mock_cluster
+      type: STRICT_DNS
+      connect_timeout: 5s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: grpc_mock_cluster
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: grpc-echo
+                      port_value: 50051
+
+    - name: rest_mock_cluster
+      type: STRICT_DNS
+      connect_timeout: 5s
+      load_assignment:
+        cluster_name: rest_mock_cluster
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: rest-mock
+                      port_value: 8080

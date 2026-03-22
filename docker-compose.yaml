@@ -1,0 +1,82 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Local PoC stack – mirrors the OpenShift Pod layout.
+#
+# Network topology:
+#   app shares the network namespace of envoy (network_mode: service:envoy)
+#   so app <-> envoy communicate over loopback, exactly like a sidecar Pod.
+#
+# Services:
+#   envoy       – Envoy sidecar  (ingress 8443, egress-grpc 9090, egress-http 9091, admin 9901)
+#   app         – Spring Boot    (HTTP 8080, gRPC server 6565 – loopback only via envoy ns)
+#   grpc-echo   – Go gRPC echo server simulating the external identity service (port 50051)
+#   rest-mock   – WireMock REST API mock simulating the external REST service  (port 8080)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Envoy sidecar ──────────────────────────────────────────────────────────
+  envoy:
+    image: envoyproxy/envoy:v1.30-latest
+    command:
+      - "-c"
+      - "/etc/envoy/config/envoy.yaml"
+      - "--log-level"
+      - "info"
+    ports:
+      - "8080:8080"   # Spring Boot actuator (plain HTTP, local testing only)
+      - "8443:8443"   # ingress  – external mTLS callers hit this
+      - "9090:9090"   # egress gRPC  (exposed for direct testing only)
+      - "9091:9091"   # egress HTTP  (exposed for direct testing only)
+      - "9901:9901"   # Envoy admin UI
+    volumes:
+      - ./openshift/envoy-local.yaml:/etc/envoy/config/envoy.yaml:ro
+      - ./envoy/sds:/etc/envoy/sds:ro
+      - ./certs:/etc/envoy/certs:ro
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9901'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - poc-net
+
+  # ── Spring Boot application ────────────────────────────────────────────────
+  # Shares envoy's network namespace → communicates with envoy over 127.0.0.1
+  app:
+    build:
+      context: ./spring-boot-app
+    environment:
+      SERVER_PORT: "8080"
+      # gRPC egress goes to Envoy listener on loopback
+      GRPC_CLIENT_IDENTITYSERVICE_ADDRESS: "static://127.0.0.1:9090"
+      GRPC_CLIENT_IDENTITYSERVICE_NEGOTIATION_TYPE: "plaintext"
+      # REST egress goes to Envoy listener on loopback
+      EGRESS_REST_BASE_URL: "http://127.0.0.1:9091"
+    network_mode: "service:envoy"   # share envoy's network namespace
+    depends_on:
+      envoy:
+        condition: service_healthy
+
+  # ── gRPC echo mock (simulates external identity service) ───────────────────
+  grpc-echo:
+    build:
+      context: ./mocks/grpc-echo
+    ports:
+      - "50051:50051"
+    networks:
+      - poc-net
+
+  # ── WireMock REST mock (simulates external REST API) ───────────────────────
+  rest-mock:
+    image: wiremock/wiremock:3.5.4
+    command: ["--verbose"]
+    ports:
+      - "8090:8080"   # host:8090 → container:8080
+    volumes:
+      - ./mocks/wiremock:/home/wiremock:ro
+    networks:
+      - poc-net
+
+networks:
+  poc-net:
+    driver: bridge

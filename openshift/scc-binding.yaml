@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SCC binding for the application ServiceAccount.
+#
+# The 'restricted' SCC is sufficient because:
+#  - Envoy runs as UID 1001 (non-root)
+#  - All ports (8443, 9090, 9091, 9901) are > 1024
+#  - No host networking or privileged containers needed
+#
+# If you need to change the UID (e.g. the base image hard-codes root):
+#  - Use 'anyuid' SCC and set runAsUser in the container spec
+#  - Grant via:  oc adm policy add-scc-to-user anyuid -z <service-account>
+#
+# This file shows how to explicitly assign the 'restricted' SCC via an
+# RBAC RoleBinding (OCP 4.11+ approach — no oc adm policy needed).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: envoy-poc-restricted-scc
+  namespace: envoy-poc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:restricted-v2
+subjects:
+  - kind: ServiceAccount
+    name: envoy-poc-sa
+    namespace: envoy-poc

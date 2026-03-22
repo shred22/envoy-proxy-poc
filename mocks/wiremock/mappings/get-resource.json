@@ -1,0 +1,61 @@
+{
+  "mappings": [
+    {
+      "name": "GET /api/resource/:id",
+      "request": {
+        "method": "GET",
+        "urlPathPattern": "/api/resource/([^/]+)"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "id": "{{request.pathSegments.[2]}}",
+          "name": "Mock Resource {{request.pathSegments.[2]}}",
+          "status": "active",
+          "source": "wiremock-mock",
+          "timestamp": "{{now format='yyyy-MM-dd HH:mm:ss'}}"
+        },
+        "transformers": ["response-template"]
+      }
+    },
+    {
+      "name": "POST /api/resource",
+      "request": {
+        "method": "POST",
+        "url": "/api/resource"
+      },
+      "response": {
+        "status": 201,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "id": "mock-id-001",
+          "created": true,
+          "source": "wiremock-mock",
+          "timestamp": "{{now format='yyyy-MM-dd HH:mm:ss'}}"
+        },
+        "transformers": ["response-template"]
+      }
+    },
+    {
+      "name": "GET /health",
+      "request": {
+        "method": "GET",
+        "url": "/health"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "status": "UP"
+        }
+      }
+    }
+  ]
+}

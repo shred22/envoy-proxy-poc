@@ -1,0 +1,50 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: envoy-sidecar-poc
+
+# gRPC server – Spring Boot app also acts as a gRPC server on port 6565
+# (used to test ingress path: external caller -> Envoy 8443 -> app 8080,
+#  and the embedded gRPC server for unit testing)
+grpc:
+  server:
+    port: 6565
+    # Plain text – TLS is handled by Envoy sidecar
+    security:
+      enabled: false
+
+  # gRPC client that routes through Envoy egress listener on loopback
+  client:
+    identity-service:
+      address: static://127.0.0.1:9090
+      negotiation-type: PLAINTEXT   # Envoy handles mTLS
+
+# REST egress base URL – Spring app sends plain HTTP to Envoy loopback
+egress:
+  rest:
+    base-url: http://127.0.0.1:9091
+    connect-timeout: 5000
+    read-timeout: 30000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+logging:
+  level:
+    com.poc.envoy: DEBUG
+    io.grpc: INFO
